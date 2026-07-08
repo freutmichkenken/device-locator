@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="robots" content="noindex,nofollow">
 <title>端末捜索コンソール</title>
 <style>
   :root {
@@ -379,9 +380,104 @@
     opacity: 1;
     transform: translateX(-50%) translateY(0);
   }
+
+  /* ロック画面 */
+  #lockScreen {
+    position: fixed;
+    inset: 0;
+    background: var(--bg);
+    background-image:
+      radial-gradient(circle at 50% -10%, rgba(255,178,56,0.08), transparent 60%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    padding: 20px;
+  }
+
+  .lock-box {
+    width: 100%;
+    max-width: 320px;
+    text-align: center;
+  }
+
+  .lock-icon {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+
+  .lock-title {
+    font-family: var(--font-display);
+    font-size: 22px;
+    margin-bottom: 24px;
+  }
+
+  #lockCodeInput {
+    width: 100%;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 16px;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 18px;
+    text-align: center;
+    letter-spacing: 0.1em;
+  }
+  #lockCodeInput:focus {
+    outline: none;
+    border-color: var(--amber);
+  }
+
+  .lock-unlock-btn {
+    width: 100%;
+    margin-top: 12px;
+    padding: 15px;
+    border-radius: 10px;
+    border: none;
+    background: var(--amber);
+    color: #1a1300;
+    font-family: var(--font-mono);
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    cursor: pointer;
+  }
+  .lock-unlock-btn:disabled {
+    background: var(--amber-dim);
+    color: rgba(255,255,255,0.5);
+  }
+
+  .lock-error {
+    color: var(--danger);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    margin-top: 12px;
+    min-height: 16px;
+  }
+
+  #appRoot {
+    display: none;
+  }
 </style>
 </head>
 <body>
+
+<div id="lockScreen">
+  <div class="lock-box">
+    <div class="lock-icon">🔒 LOCKED</div>
+    <div class="lock-title">パスコードを入力</div>
+    <input type="password" id="lockCodeInput" placeholder="••••••" autocomplete="off">
+    <button class="lock-unlock-btn" id="unlockBtn">解除</button>
+    <div class="lock-error" id="lockError"></div>
+  </div>
+</div>
+
+<div id="appRoot">
 
 <header>
   <div class="eyebrow"><span class="status-dot"></span>STANDBY</div>
@@ -408,9 +504,11 @@
 
   <div class="storage-note">
     ※ 端末情報・位置情報はGoogleサーバー（Apps Script）に保存されます。ブラウザやアプリの表示状態に関わらず残ります。<br>
-    ※ このページのURLを知っている人は誰でも同じ内容を閲覧・操作できます（家族間での共有を想定した設定です）。
+    ※ このページはパスコードで保護されています。ただし静的サイトの仕組み上、完全な防御ではありません（詳細はチャットの説明を参照）。
   </div>
 </main>
+
+</div>
 
 <div class="toast" id="toast"></div>
 
@@ -420,6 +518,13 @@ const GAS_URL = 'https://script.google.com/macros/s/AKfycbwHg1qXOEsvzm1phHmw0bht
 
 let devices = [];
 let editingId = null;
+let ACCESS_CODE = '';
+
+const lockScreen = document.getElementById('lockScreen');
+const appRoot = document.getElementById('appRoot');
+const lockCodeInput = document.getElementById('lockCodeInput');
+const unlockBtn = document.getElementById('unlockBtn');
+const lockError = document.getElementById('lockError');
 
 const deviceListEl = document.getElementById('deviceList');
 const addToggleBtn = document.getElementById('addToggleBtn');
@@ -430,22 +535,86 @@ const saveAddBtn = document.getElementById('saveAddBtn');
 const cancelAddBtn = document.getElementById('cancelAddBtn');
 const toastEl = document.getElementById('toast');
 
+function withCode(url) {
+  const sep = url.includes('?') ? '&' : '?';
+  return url + sep + 'code=' + encodeURIComponent(ACCESS_CODE);
+}
+
+function getStoredCode() {
+  try { return localStorage.getItem('accessCode') || ''; } catch (e) { return ''; }
+}
+
+function storeCode(code) {
+  try { localStorage.setItem('accessCode', code); } catch (e) { /* 保存できない環境では毎回入力が必要になります */ }
+}
+
+// 指定したコードでGASにアクセスできるか確認し、可能ならdevicesを返す。不可ならnullを返す
+async function tryUnlock(code) {
+  try {
+    const res = await fetch(GAS_URL + '?action=getDevices&code=' + encodeURIComponent(code));
+    const data = await res.json();
+    if (data && data.status === 'unauthorized') return null;
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    return undefined; // 通信エラー（パスコードの正誤は不明）
+  }
+}
+
+async function boot() {
+  const stored = getStoredCode();
+  if (stored) {
+    const result = await tryUnlock(stored);
+    if (result !== null && result !== undefined) {
+      ACCESS_CODE = stored;
+      devices = result;
+      showApp();
+      return;
+    }
+  }
+  lockScreen.style.display = 'flex';
+  lockCodeInput.focus();
+}
+
+function showApp() {
+  lockScreen.style.display = 'none';
+  appRoot.style.display = 'block';
+  render();
+}
+
+async function attemptUnlock() {
+  const code = lockCodeInput.value.trim();
+  if (!code) return;
+
+  unlockBtn.disabled = true;
+  unlockBtn.textContent = '確認中...';
+  lockError.textContent = '';
+
+  const result = await tryUnlock(code);
+
+  if (result === undefined) {
+    lockError.textContent = '通信に失敗しました。時間をおいて再度お試しください';
+  } else if (result === null) {
+    lockError.textContent = 'パスコードが違います';
+  } else {
+    ACCESS_CODE = code;
+    storeCode(code);
+    devices = result;
+    showApp();
+  }
+
+  unlockBtn.disabled = false;
+  unlockBtn.textContent = '解除';
+}
+
+unlockBtn.addEventListener('click', attemptUnlock);
+lockCodeInput.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter') attemptUnlock();
+});
+
 function showToast(msg) {
   toastEl.textContent = msg;
   toastEl.classList.add('show');
   setTimeout(() => toastEl.classList.remove('show'), 2600);
-}
-
-async function loadDevices() {
-  try {
-    const res = await fetch(GAS_URL + '?action=getDevices');
-    const data = await res.json();
-    devices = Array.isArray(data) ? data : [];
-  } catch (e) {
-    devices = [];
-    showToast('端末リストの取得に失敗しました');
-  }
-  render();
 }
 
 async function saveDevices() {
@@ -453,7 +622,8 @@ async function saveDevices() {
     await fetch(GAS_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'action=saveDevices&payload=' + encodeURIComponent(JSON.stringify(devices))
+      body: 'action=saveDevices&code=' + encodeURIComponent(ACCESS_CODE) +
+            '&payload=' + encodeURIComponent(JSON.stringify(devices))
     });
   } catch (e) {
     showToast('保存に失敗しました');
@@ -475,7 +645,7 @@ function render() {
       <div class="device-status" id="status-${d.id}">${d.lastSent ? '前回送信：' + d.lastSent : '未送信'}</div>
       <button class="send-btn" id="btn-${d.id}" onclick="sendRequest('${d.id}')">
         <span class="radar-ring" id="ring-${d.id}"></span>
-        位置情報 + 写真を送信
+        <span class="btn-label" id="label-${d.id}">位置情報 + 写真を送信</span>
       </button>
       <button class="check-btn" id="checkbtn-${d.id}" onclick="checkStatus('${d.id}')">最新の位置情報を確認</button>
       <div class="result-area" id="result-${d.id}"></div>
@@ -498,13 +668,13 @@ async function sendRequest(id) {
   const statusEl = document.getElementById('status-' + id);
 
   btn.disabled = true;
-  btn.textContent = '送信中...';
+  document.getElementById('label-' + id).textContent = '送信中...';
   ring.classList.remove('active');
   void ring.offsetWidth;
   ring.classList.add('active');
 
   try {
-    await fetch(device.webhookUrl, { method: 'POST', mode: 'no-cors' });
+    fetch(device.webhookUrl,{method:'POST',mode:'no-cors',keepalive:true}).catch(console.error);
 
     const now = new Date();
     const timeStr = now.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
@@ -512,14 +682,14 @@ async function sendRequest(id) {
     await saveDevices();
 
     btn.classList.add('sent-flash');
-    btn.textContent = '送信しました ✓';
+    document.getElementById('label-' + id).textContent = '送信しました ✓';
     statusEl.textContent = '前回送信：' + timeStr;
     statusEl.classList.add('sent');
     showToast(device.name + ' に送信リクエストを送りました');
 
     setTimeout(() => {
       btn.classList.remove('sent-flash');
-      btn.textContent = '位置情報 + 写真を送信';
+      document.getElementById('label-' + id).textContent = '位置情報 + 写真を送信';
       btn.disabled = false;
     }, 1800);
   } catch (e) {
@@ -528,7 +698,7 @@ async function sendRequest(id) {
     statusEl.classList.add('error');
     showToast('送信に失敗しました。URLを確認してください');
     setTimeout(() => {
-      btn.textContent = '位置情報 + 写真を送信';
+      document.getElementById('label-' + id).textContent = '位置情報 + 写真を送信';
       btn.disabled = false;
     }, 1800);
   }
@@ -600,11 +770,13 @@ async function checkStatus(id) {
   btn.textContent = '確認中...';
 
   try {
-    const url = GAS_URL + '?device=' + encodeURIComponent(device.name);
+    const url = GAS_URL + '?device=' + encodeURIComponent(device.name) + '&code=' + encodeURIComponent(ACCESS_CODE);
     const res = await fetch(url);
     const data = await res.json();
 
-    if (!data || (!data.lat && !data.photoUrl)) {
+    if (data && data.status === 'unauthorized') {
+      resultEl.innerHTML = `<div class="result-box"><div class="result-empty">認証エラー。ページを再読み込みしてください</div></div>`;
+    } else if (!data || (!data.lat && !data.photoUrl)) {
       resultEl.innerHTML = `<div class="result-box"><div class="result-empty">まだ位置情報が届いていません</div></div>`;
     } else {
       const mapUrl = (data.lat && data.lng)
@@ -632,7 +804,7 @@ async function checkStatus(id) {
   btn.textContent = '最新の位置情報を確認';
 }
 
-loadDevices();
+boot();
 </script>
 
 </body>
