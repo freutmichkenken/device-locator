@@ -123,6 +123,16 @@
     font-weight: 500;
   }
 
+  .device-card-actions {
+    display: flex;
+    gap: 4px;
+  }
+
+  .device-delete-btn {
+    color: var(--danger);
+  }
+  .device-delete-btn:hover { color: #ff7a63; }
+
   .device-edit-btn {
     background: none;
     border: none;
@@ -640,7 +650,10 @@ function render() {
     <div class="device-card" data-id="${d.id}">
       <div class="device-row">
         <div class="device-name">${escapeHtml(d.name)}</div>
-        <button class="device-edit-btn" onclick="startEdit('${d.id}')">編集</button>
+        <div class="device-card-actions">
+          <button class="device-edit-btn" onclick="startEdit('${d.id}')">編集</button>
+          <button class="device-edit-btn device-delete-btn" onclick="deleteDevice('${d.id}')">削除</button>
+        </div>
       </div>
       <div class="device-status" id="status-${d.id}">${d.lastSent ? '前回送信：' + d.lastSent : '未送信'}</div>
       <button class="send-btn" id="btn-${d.id}" onclick="sendRequest('${d.id}')">
@@ -701,6 +714,24 @@ async function sendRequest(id) {
       document.getElementById('label-' + id).textContent = '位置情報 + 写真を送信';
       btn.disabled = false;
     }, 1800);
+  }
+}
+
+async function deleteDevice(id) {
+  const device = devices.find(d => d.id === id);
+  if (!device) return;
+
+  const ok = confirm(`「${device.name}」を削除します。よろしいですか？`);
+  if (!ok) return;
+
+  devices = devices.filter(d => d.id !== id);
+  await saveDevices();
+  render();
+  showToast(device.name + ' を削除しました');
+
+  // 編集中だった端末を削除した場合はフォームも閉じる
+  if (editingId === id) {
+    resetForm();
   }
 }
 
