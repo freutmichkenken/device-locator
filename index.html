@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="robots" content="noindex,nofollow">
 <title>端末捜索コンソール</title>
 <style>
@@ -40,6 +40,22 @@
     border-bottom: 1px solid var(--panel-border);
     position: relative;
   }
+
+  .lock-again-btn {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    background: none;
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.05em;
+    padding: 6px 10px;
+    cursor: pointer;
+  }
+  .lock-again-btn:hover { color: var(--text); border-color: var(--muted); }
 
   .status-dot {
     display: inline-block;
@@ -249,6 +265,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 8px;
     font-family: var(--font-mono);
     font-size: 12px;
   }
@@ -261,6 +278,7 @@
     color: var(--teal);
     text-decoration: none;
     font-weight: 700;
+    white-space: nowrap;
   }
   .result-map-link:hover { text-decoration: underline; }
 
@@ -270,6 +288,7 @@
     color: var(--muted);
     text-align: center;
     padding: 8px 0;
+    line-height: 1.6;
   }
 
   .empty-state {
@@ -353,6 +372,7 @@
     letter-spacing: 0.02em;
   }
   .btn-primary { background: var(--amber); color: #1a1300; font-weight: 700; }
+  .btn-primary:disabled { background: var(--amber-dim); cursor: default; }
   .btn-secondary { background: transparent; border: 1px solid var(--panel-border); color: var(--muted); }
   .btn-danger { background: transparent; border: 1px solid var(--danger); color: var(--danger); flex: none; padding: 12px 16px; }
 
@@ -490,6 +510,7 @@
 <div id="appRoot">
 
 <header>
+  <button class="lock-again-btn" id="lockAgainBtn">ロック</button>
   <div class="eyebrow"><span class="status-dot"></span>STANDBY</div>
   <h1>端末捜索コンソール</h1>
   <div class="sub">送信ボタンでMacroDroidを起動し、位置情報と写真をメールで受信。<br>このページ上でも最新の位置情報を確認できます</div>
@@ -501,7 +522,7 @@
   <div class="add-section">
     <button class="add-toggle" id="addToggleBtn">＋ 端末を追加</button>
     <div class="add-form" id="addForm">
-      <label class="field-label">端末名</label>
+      <label class="field-label">端末名（メールの件名「端末位置情報:」の後ろと同じ名前）</label>
       <input type="text" id="inputName" placeholder="例：K のスマホ">
       <label class="field-label">Webhook URL</label>
       <input type="url" id="inputUrl" placeholder="https://trigger.macrodroid.com/xxxx/xxxx">
@@ -514,7 +535,8 @@
 
   <div class="storage-note">
     ※ 端末情報・位置情報はGoogleサーバー（Apps Script）に保存されます。ブラウザやアプリの表示状態に関わらず残ります。<br>
-    ※ このページはパスコードで保護されています。ただし静的サイトの仕組み上、完全な防御ではありません（詳細はチャットの説明を参照）。
+    ※ Webhook URL はサーバーにだけ保存し、このページには表示しません。<br>
+    ※ パスコードはこのブラウザに保存されます。共用の端末では、使い終わったら右上の「ロック」を押してください。
   </div>
 </main>
 
@@ -525,6 +547,8 @@
 <script>
 // このアプリの唯一のバックエンド：GAS WebアプリのURL
 const GAS_URL = 'https://script.google.com/macros/s/AKfycbwHg1qXOEsvzm1phHmw0bhtWywjFcN3Cs5tc-N-3qVuXwv83lBpr9tC2ktirE_FYTM8/exec';
+const WEBHOOK_URL_PREFIX = 'https://trigger.macrodroid.com/';
+const SEND_LABEL = '位置情報 + 写真を送信';
 
 let devices = [];
 let editingId = null;
@@ -535,6 +559,7 @@ const appRoot = document.getElementById('appRoot');
 const lockCodeInput = document.getElementById('lockCodeInput');
 const unlockBtn = document.getElementById('unlockBtn');
 const lockError = document.getElementById('lockError');
+const lockAgainBtn = document.getElementById('lockAgainBtn');
 
 const deviceListEl = document.getElementById('deviceList');
 const addToggleBtn = document.getElementById('addToggleBtn');
@@ -545,9 +570,21 @@ const saveAddBtn = document.getElementById('saveAddBtn');
 const cancelAddBtn = document.getElementById('cancelAddBtn');
 const toastEl = document.getElementById('toast');
 
-function withCode(url) {
-  const sep = url.includes('?') ? '&' : '?';
-  return url + sep + 'code=' + encodeURIComponent(ACCESS_CODE);
+// GASへの呼び出しはすべてPOST（パスコードをURLに載せない）。
+// 通信エラーは { status: 'network' } として返す
+async function api(action, params = {}, code = ACCESS_CODE) {
+  const body = new URLSearchParams({ action, code, ...params });
+  try {
+    const res = await fetch(GAS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString()
+    });
+    const data = await res.json();
+    return (data && typeof data === 'object') ? data : { status: 'error' };
+  } catch (e) {
+    return { status: 'network' };
+  }
 }
 
 function getStoredCode() {
@@ -558,28 +595,21 @@ function storeCode(code) {
   try { localStorage.setItem('accessCode', code); } catch (e) { /* 保存できない環境では毎回入力が必要になります */ }
 }
 
-// 指定したコードでGASにアクセスできるか確認し、可能ならdevicesを返す。不可ならnullを返す
-async function tryUnlock(code) {
-  try {
-    const res = await fetch(GAS_URL + '?action=getDevices&code=' + encodeURIComponent(code));
-    const data = await res.json();
-    if (data && data.status === 'unauthorized') return null;
-    return Array.isArray(data) ? data : [];
-  } catch (e) {
-    return undefined; // 通信エラー（パスコードの正誤は不明）
-  }
+function clearStoredCode() {
+  try { localStorage.removeItem('accessCode'); } catch (e) { /* 何もしない */ }
 }
 
 async function boot() {
   const stored = getStoredCode();
   if (stored) {
-    const result = await tryUnlock(stored);
-    if (result !== null && result !== undefined) {
+    const result = await api('getDevices', {}, stored);
+    if (result.status === 'ok') {
       ACCESS_CODE = stored;
-      devices = result;
+      devices = result.devices || [];
       showApp();
       return;
     }
+    if (result.status === 'unauthorized') clearStoredCode();
   }
   lockScreen.style.display = 'flex';
   lockCodeInput.focus();
@@ -599,45 +629,64 @@ async function attemptUnlock() {
   unlockBtn.textContent = '確認中...';
   lockError.textContent = '';
 
-  const result = await tryUnlock(code);
+  const result = await api('getDevices', {}, code);
 
-  if (result === undefined) {
-    lockError.textContent = '通信に失敗しました。時間をおいて再度お試しください';
-  } else if (result === null) {
-    lockError.textContent = 'パスコードが違います';
-  } else {
+  if (result.status === 'ok') {
     ACCESS_CODE = code;
     storeCode(code);
-    devices = result;
+    devices = result.devices || [];
+    lockCodeInput.value = '';
     showApp();
+  } else if (result.status === 'unauthorized') {
+    lockError.textContent = 'パスコードが違います';
+  } else {
+    lockError.textContent = '通信に失敗しました。時間をおいて再度お試しください';
   }
 
   unlockBtn.disabled = false;
   unlockBtn.textContent = '解除';
 }
 
+// この端末に保存したパスコードを消して、ロック画面に戻す
+function lockAgain() {
+  clearStoredCode();
+  ACCESS_CODE = '';
+  devices = [];
+  deviceListEl.innerHTML = '';
+  resetForm();
+  appRoot.style.display = 'none';
+  lockScreen.style.display = 'flex';
+  lockCodeInput.focus();
+}
+
 unlockBtn.addEventListener('click', attemptUnlock);
 lockCodeInput.addEventListener('keydown', (ev) => {
   if (ev.key === 'Enter') attemptUnlock();
 });
+lockAgainBtn.addEventListener('click', lockAgain);
 
+let toastTimer = null;
 function showToast(msg) {
   toastEl.textContent = msg;
   toastEl.classList.add('show');
-  setTimeout(() => toastEl.classList.remove('show'), 2600);
+  // 続けて呼ばれたとき、前のタイマーで新しいメッセージがすぐ消えないようにする
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2600);
 }
 
-async function saveDevices() {
-  try {
-    await fetch(GAS_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'action=saveDevices&code=' + encodeURIComponent(ACCESS_CODE) +
-            '&payload=' + encodeURIComponent(JSON.stringify(devices))
-    });
-  } catch (e) {
-    showToast('保存に失敗しました');
-  }
+// 失敗時の表示文を、GASの応答から組み立てる
+function failureMessage(result, fallback) {
+  if (result.status === 'unauthorized') return 'パスコードが無効です。右上の「ロック」から入り直してください';
+  if (result.status === 'network') return '通信に失敗しました';
+  if (result.status === 'busy') return '混み合っています。少し待ってからやり直してください';
+  return result.message || fallback;
+}
+
+function formatDateTime(iso) {
+  const d = new Date(iso);
+  // 旧形式（「12:34」だけ）の値はそのまま出す
+  if (isNaN(d.getTime())) return String(iso);
+  return d.toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
 function render() {
@@ -647,74 +696,81 @@ function render() {
   }
 
   deviceListEl.innerHTML = devices.map(d => `
-    <div class="device-card" data-id="${d.id}">
+    <div class="device-card" data-id="${escapeHtml(d.id)}">
       <div class="device-row">
         <div class="device-name">${escapeHtml(d.name)}</div>
         <div class="device-card-actions">
-          <button class="device-edit-btn" onclick="startEdit('${d.id}')">編集</button>
-          <button class="device-edit-btn device-delete-btn" onclick="deleteDevice('${d.id}')">削除</button>
+          <button class="device-edit-btn" data-action="edit">編集</button>
+          <button class="device-edit-btn device-delete-btn" data-action="delete">削除</button>
         </div>
       </div>
-      <div class="device-status" id="status-${d.id}">${d.lastSent ? '前回送信：' + d.lastSent : '未送信'}</div>
-      <button class="send-btn" id="btn-${d.id}" onclick="sendRequest('${d.id}')">
-        <span class="radar-ring" id="ring-${d.id}"></span>
-        <span class="btn-label" id="label-${d.id}">位置情報 + 写真を送信</span>
+      <div class="device-status">${d.lastSent ? '前回送信：' + escapeHtml(formatDateTime(d.lastSent)) : '未送信'}</div>
+      <button class="send-btn" data-action="send">
+        <span class="radar-ring"></span>
+        <span class="btn-label">${SEND_LABEL}</span>
       </button>
-      <button class="check-btn" id="checkbtn-${d.id}" onclick="checkStatus('${d.id}')">最新の位置情報を確認</button>
-      <div class="result-area" id="result-${d.id}"></div>
+      <button class="check-btn" data-action="check">最新の位置情報を確認</button>
+      <div class="result-area"></div>
     </div>
   `).join('');
 }
 
+// カード内のボタンはイベント委譲で受ける（idをonclickの文字列に埋め込まない）
+deviceListEl.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('[data-action]');
+  if (!btn) return;
+  const card = btn.closest('.device-card');
+  if (!card) return;
+  const handlers = { edit: startEdit, delete: deleteDevice, send: sendRequest, check: checkStatus };
+  const handler = handlers[btn.dataset.action];
+  if (handler) handler(card.dataset.id, card);
+});
+
 function escapeHtml(str) {
   const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
+  div.textContent = str == null ? '' : String(str);
+  // textContent→innerHTML では " がエスケープされないので、属性値に使えるよう足す
+  return div.innerHTML.replace(/"/g, '&quot;');
 }
 
-async function sendRequest(id) {
+async function sendRequest(id, card) {
   const device = devices.find(d => d.id === id);
   if (!device) return;
 
-  const btn = document.getElementById('btn-' + id);
-  const ring = document.getElementById('ring-' + id);
-  const statusEl = document.getElementById('status-' + id);
+  const btn = card.querySelector('.send-btn');
+  const ring = card.querySelector('.radar-ring');
+  const label = card.querySelector('.btn-label');
+  const statusEl = card.querySelector('.device-status');
 
   btn.disabled = true;
-  document.getElementById('label-' + id).textContent = '送信中...';
+  label.textContent = '送信中...';
   ring.classList.remove('active');
   void ring.offsetWidth;
   ring.classList.add('active');
 
-  try {
-    fetch(device.webhookUrl,{method:'POST',mode:'no-cors',keepalive:true}).catch(console.error);
+  const result = await api('trigger', { id });
 
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
-    device.lastSent = timeStr;
-    await saveDevices();
-
+  statusEl.classList.remove('sent', 'error');
+  if (result.status === 'ok') {
+    device.lastSent = result.lastSent;
     btn.classList.add('sent-flash');
-    document.getElementById('label-' + id).textContent = '送信しました ✓';
-    statusEl.textContent = '前回送信：' + timeStr;
+    label.textContent = '送信しました ✓';
+    statusEl.textContent = '前回送信：' + formatDateTime(result.lastSent) +
+      (result.lastSentSaved === false ? '（送信時刻は記録できませんでした）' : '');
     statusEl.classList.add('sent');
-    showToast(device.name + ' に送信リクエストを送りました');
-
-    setTimeout(() => {
-      btn.classList.remove('sent-flash');
-      document.getElementById('label-' + id).textContent = '位置情報 + 写真を送信';
-      btn.disabled = false;
-    }, 1800);
-  } catch (e) {
-    btn.textContent = '送信失敗';
-    statusEl.textContent = 'エラー：通信に失敗しました';
+    showToast(device.name + ' のMacroDroidを起動しました');
+  } else {
+    label.textContent = '送信失敗';
+    statusEl.textContent = 'エラー：' + failureMessage(result, '送信に失敗しました');
     statusEl.classList.add('error');
-    showToast('送信に失敗しました。URLを確認してください');
-    setTimeout(() => {
-      document.getElementById('label-' + id).textContent = '位置情報 + 写真を送信';
-      btn.disabled = false;
-    }, 1800);
+    showToast('送信に失敗しました');
   }
+
+  setTimeout(() => {
+    btn.classList.remove('sent-flash');
+    label.textContent = SEND_LABEL;
+    btn.disabled = false;
+  }, 1800);
 }
 
 async function deleteDevice(id) {
@@ -724,8 +780,13 @@ async function deleteDevice(id) {
   const ok = confirm(`「${device.name}」を削除します。よろしいですか？`);
   if (!ok) return;
 
-  devices = devices.filter(d => d.id !== id);
-  await saveDevices();
+  const result = await api('deleteDevice', { id });
+  if (result.status !== 'ok') {
+    showToast(failureMessage(result, '削除に失敗しました'));
+    return;
+  }
+
+  devices = result.devices;
   render();
   showToast(device.name + ' を削除しました');
 
@@ -740,7 +801,9 @@ function startEdit(id) {
   if (!device) return;
   editingId = id;
   inputName.value = device.name;
-  inputUrl.value = device.webhookUrl;
+  // 保存済みのURLはサーバーから返さないので、空欄のまま保存すると変更しない
+  inputUrl.value = '';
+  inputUrl.placeholder = '変更しない場合は空欄のまま';
   addForm.classList.add('open');
   saveAddBtn.textContent = '更新';
   addToggleBtn.style.display = 'none';
@@ -751,6 +814,7 @@ function resetForm() {
   editingId = null;
   inputName.value = '';
   inputUrl.value = '';
+  inputUrl.placeholder = WEBHOOK_URL_PREFIX + 'xxxx/xxxx';
   addForm.classList.remove('open');
   addToggleBtn.style.display = 'block';
   saveAddBtn.textContent = '保存';
@@ -767,68 +831,80 @@ saveAddBtn.addEventListener('click', async () => {
   const name = inputName.value.trim();
   const url = inputUrl.value.trim();
 
-  if (!name || !url) {
+  if (!name || (!editingId && !url)) {
     showToast('端末名とURLの両方を入力してください');
     return;
   }
-
-  if (editingId) {
-    const device = devices.find(d => d.id === editingId);
-    device.name = name;
-    device.webhookUrl = url;
-  } else {
-    devices.push({
-      id: 'dev_' + Date.now(),
-      name: name,
-      webhookUrl: url,
-      lastSent: null
-    });
+  if (url && !url.startsWith(WEBHOOK_URL_PREFIX)) {
+    showToast('URLは ' + WEBHOOK_URL_PREFIX + ' で始まるものを入力してください');
+    return;
   }
 
-  await saveDevices();
+  saveAddBtn.disabled = true;
+  const result = editingId
+    ? await api('updateDevice', { id: editingId, name, webhookUrl: url })
+    : await api('addDevice', { name, webhookUrl: url });
+  saveAddBtn.disabled = false;
+
+  if (result.status !== 'ok') {
+    showToast(failureMessage(result, '保存に失敗しました'));
+    return;
+  }
+
+  devices = result.devices;
   render();
   resetForm();
+  showToast('保存しました');
 });
 
-async function checkStatus(id) {
+function resultBox(inner) {
+  return `<div class="result-box">${inner}</div>`;
+}
+
+function resultMessage(text) {
+  return resultBox(`<div class="result-empty">${escapeHtml(text)}</div>`);
+}
+
+async function checkStatus(id, card) {
   const device = devices.find(d => d.id === id);
   if (!device) return;
 
-  const btn = document.getElementById('checkbtn-' + id);
-  const resultEl = document.getElementById('result-' + id);
+  const btn = card.querySelector('.check-btn');
+  const resultEl = card.querySelector('.result-area');
 
   btn.disabled = true;
   btn.textContent = '確認中...';
 
-  try {
-    const url = GAS_URL + '?device=' + encodeURIComponent(device.name) + '&code=' + encodeURIComponent(ACCESS_CODE);
-    const res = await fetch(url);
-    const data = await res.json();
+  const result = await api('getStatus', { device: device.name });
 
-    if (data && data.status === 'unauthorized') {
-      resultEl.innerHTML = `<div class="result-box"><div class="result-empty">認証エラー。ページを再読み込みしてください</div></div>`;
-    } else if (!data || (!data.lat && !data.photoUrl)) {
-      resultEl.innerHTML = `<div class="result-box"><div class="result-empty">まだ位置情報が届いていません</div></div>`;
-    } else {
-      const mapUrl = (data.lat && data.lng)
-        ? `https://www.google.com/maps?q=${data.lat},${data.lng}`
-        : null;
-      const timeStr = data.timestamp
-        ? new Date(data.timestamp).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-        : '';
+  if (result.status === 'notfound') {
+    const known = result.knownDevices || [];
+    resultEl.innerHTML = resultMessage(known.length
+      ? `「${device.name}」の位置情報は届いていません。届いている端末名：${known.join('、')}（端末名をメールの件名と揃えてください）`
+      : 'まだ位置情報が届いていません');
+  } else if (result.status !== 'ok') {
+    resultEl.innerHTML = resultMessage(failureMessage(result, '取得に失敗しました'));
+  } else {
+    const data = result.record || {};
+    const hasLocation = data.lat != null && data.lng != null;
+    const mapUrl = hasLocation
+      ? `https://www.google.com/maps?q=${encodeURIComponent(data.lat + ',' + data.lng)}`
+      : null;
+    const photos = (data.photoUrls || [])
+      .map(u => `<img class="result-photo" src="${escapeHtml(u)}" alt="端末周辺の写真">`)
+      .join('');
+    const lines = [];
+    if (hasLocation) lines.push('位置：' + formatDateTime(data.locationAt || data.timestamp));
+    if (data.photoAt) lines.push('写真：' + formatDateTime(data.photoAt));
+    if (data.battery != null) lines.push('電池：' + data.battery + '%');
 
-      resultEl.innerHTML = `
-        <div class="result-box">
-          ${data.photoUrl ? `<img class="result-photo" src="${data.photoUrl}" alt="端末周辺の写真">` : ''}
-          <div class="result-row">
-            <span class="result-time">${timeStr}</span>
-            ${mapUrl ? `<a class="result-map-link" href="${mapUrl}" target="_blank" rel="noopener">地図で開く →</a>` : ''}
-          </div>
-        </div>
-      `;
-    }
-  } catch (e) {
-    resultEl.innerHTML = `<div class="result-box"><div class="result-empty">取得に失敗しました。APIのURLを確認してください</div></div>`;
+    resultEl.innerHTML = resultBox(`
+      ${photos}
+      <div class="result-row">
+        <span class="result-time">${escapeHtml(lines.join(' / '))}</span>
+        ${mapUrl ? `<a class="result-map-link" href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener">地図で開く →</a>` : ''}
+      </div>
+    `);
   }
 
   btn.disabled = false;
